@@ -78,7 +78,8 @@ def download_data(
         local_path = os.path.join(download_dir, f"{timestamp}.json.gz")
 
         try:
-            with requests.get(url, stream=True, timeout=10) as r:
+            # with requests.get(url, stream=True, timeout=10) as r:
+            with requests.get(url, stream=True, timeout=10, headers={"Accept-Encoding": "identity"}) as r:
                 # when file is not found
                 if r.status_code == 404:
                     retries += 1
