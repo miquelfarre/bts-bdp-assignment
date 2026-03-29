@@ -15,14 +15,13 @@ import json
 import logging
 import os
 import sqlite3
-import tempfile
+from datetime import datetime
 
 import boto3
 import pandas as pd
 import requests
 from airflow import DAG
 from airflow.operators.python import PythonOperator
-from datetime import datetime
 
 log = logging.getLogger(__name__)
 
@@ -112,7 +111,7 @@ def download_to_bronze(**_):
 # Task 2 — Parse bronze files, enrich, store Parquet to MinIO silver
 # ---------------------------------------------------------------------------
 
-def process_to_silver(**_):
+def process_to_silver(**_):  # noqa: C901
     s3 = _s3()
 
     # ------------------------------------------------------------------

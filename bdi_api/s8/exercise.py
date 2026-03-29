@@ -3,7 +3,7 @@ import os
 import sqlite3
 
 import requests
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, status
 from pydantic import BaseModel
 
 from bdi_api.settings import Settings

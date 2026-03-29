@@ -3,7 +3,7 @@ from typing import Annotated
 from fastapi import APIRouter, HTTPException, status
 from fastapi.params import Query
 from pydantic import BaseModel
-from pymongo import MongoClient, DESCENDING
+from pymongo import DESCENDING, MongoClient
 
 from bdi_api.settings import Settings
 

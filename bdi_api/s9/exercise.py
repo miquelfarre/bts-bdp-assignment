@@ -163,7 +163,7 @@ def get_pipeline_stages(pipeline_id: str) -> list[PipelineStage]:
     try:
         run_id = int(pipeline_id)
     except ValueError:
-        raise HTTPException(status_code=404, detail=f"Pipeline '{pipeline_id}' not found")
+        raise HTTPException(status_code=404, detail=f"Pipeline '{pipeline_id}' not found") from None
 
     jobs = _fetch_jobs(run_id)
     if not jobs:
