@@ -1,7 +1,9 @@
+from pathlib import Path
 from typing import Annotated
 
 from fastapi import APIRouter, status
 from fastapi.params import Query
+from sqlalchemy import create_engine, text
 
 from bdi_api.settings import Settings
 
@@ -16,6 +18,18 @@ s5 = APIRouter(
     tags=["s5"],
 )
 
+_SQL_DIR = Path(__file__).parent
+_SCHEMA_FILE = _SQL_DIR / "hr_schema.sql"
+_SEED_FILE = _SQL_DIR / "hr_seed_data.sql"
+
+
+def get_engine():
+    return create_engine(settings.db_url)
+
+
+def _is_sqlite() -> bool:
+    return settings.db_url.startswith("sqlite")
+
 
 @s5.post("/db/init")
 def init_database() -> str:
@@ -25,8 +39,21 @@ def init_database() -> str:
     Use the BDI_DB_URL environment variable to configure the database connection.
     Default: sqlite:///hr_database.db
     """
-    # TODO: Connect to the database using SQLAlchemy or psycopg2
-    # TODO: Execute the schema creation SQL (see hr_schema.sql)
+    schema_sql = _SCHEMA_FILE.read_text()
+    if _is_sqlite():
+        # SQLite: strip CASCADE only from DROP TABLE lines, and replace SERIAL type
+        fixed_lines = []
+        for line in schema_sql.splitlines():
+            if line.strip().upper().startswith("DROP TABLE"):
+                line = line.replace(" CASCADE", "")
+            fixed_lines.append(line)
+        schema_sql = "\n".join(fixed_lines).replace("SERIAL", "INTEGER")
+    engine = get_engine()
+    with engine.begin() as conn:
+        for statement in schema_sql.strip().split(";"):
+            stmt = statement.strip()
+            if stmt:
+                conn.execute(text(stmt))
     return "OK"
 
 
@@ -36,8 +63,13 @@ def seed_database() -> str:
 
     Inserts departments, employees, projects, assignments, and salary history.
     """
-    # TODO: Connect to the database
-    # TODO: Execute the seed data SQL (see hr_seed_data.sql)
+    seed_sql = _SEED_FILE.read_text()
+    engine = get_engine()
+    with engine.begin() as conn:
+        for statement in seed_sql.strip().split(";"):
+            stmt = statement.strip()
+            if stmt:
+                conn.execute(text(stmt))
     return "OK"
 
 
@@ -47,8 +79,10 @@ def list_departments() -> list[dict]:
 
     Each department should include: id, name, location
     """
-    # TODO: Query all departments and return as list of dicts
-    return []
+    engine = get_engine()
+    with engine.connect() as conn:
+        rows = conn.execute(text("SELECT id, name, location FROM department ORDER BY id")).mappings().all()
+    return [dict(row) for row in rows]
 
 
 @s5.get("/employees/")
@@ -66,8 +100,23 @@ def list_employees(
 
     Each employee should include: id, first_name, last_name, email, salary, department_name
     """
-    # TODO: Query employees with JOIN to department, apply OFFSET and LIMIT
-    return []
+    offset = (page - 1) * per_page
+    engine = get_engine()
+    with engine.connect() as conn:
+        rows = conn.execute(
+            text(
+                """
+                SELECT e.id, e.first_name, e.last_name, e.email, e.salary,
+                       d.name AS department_name
+                FROM employee e
+                LEFT JOIN department d ON e.department_id = d.id
+                ORDER BY e.id
+                LIMIT :limit OFFSET :offset
+                """
+            ),
+            {"limit": per_page, "offset": offset},
+        ).mappings().all()
+    return [dict(row) for row in rows]
 
 
 @s5.get("/departments/{dept_id}/employees")
@@ -76,8 +125,20 @@ def list_department_employees(dept_id: int) -> list[dict]:
 
     Each employee should include: id, first_name, last_name, email, salary, hire_date
     """
-    # TODO: Query employees filtered by department_id
-    return []
+    engine = get_engine()
+    with engine.connect() as conn:
+        rows = conn.execute(
+            text(
+                """
+                SELECT id, first_name, last_name, email, salary, hire_date
+                FROM employee
+                WHERE department_id = :dept_id
+                ORDER BY id
+                """
+            ),
+            {"dept_id": dept_id},
+        ).mappings().all()
+    return [dict(row) for row in rows]
 
 
 @s5.get("/departments/{dept_id}/stats")
@@ -86,8 +147,32 @@ def department_stats(dept_id: int) -> dict:
 
     Response should include: department_name, employee_count, avg_salary, project_count
     """
-    # TODO: Calculate department statistics using JOINs and aggregations
-    return {}
+    engine = get_engine()
+    with engine.connect() as conn:
+        row = conn.execute(
+            text(
+                """
+                SELECT
+                    d.name AS department_name,
+                    COUNT(DISTINCT e.id) AS employee_count,
+                    AVG(e.salary) AS avg_salary,
+                    COUNT(DISTINCT p.id) AS project_count
+                FROM department d
+                LEFT JOIN employee e ON e.department_id = d.id
+                LEFT JOIN project p ON p.department_id = d.id
+                WHERE d.id = :dept_id
+                GROUP BY d.id, d.name
+                """
+            ),
+            {"dept_id": dept_id},
+        ).mappings().first()
+    if row is None:
+        return {}
+    result = dict(row)
+    # Ensure avg_salary is a float (or None) rather than a Decimal
+    if result.get("avg_salary") is not None:
+        result["avg_salary"] = float(result["avg_salary"])
+    return result
 
 
 @s5.get("/employees/{emp_id}/salary-history")
@@ -96,5 +181,17 @@ def salary_history(emp_id: int) -> list[dict]:
 
     Each entry should include: change_date, old_salary, new_salary, reason
     """
-    # TODO: Query salary_history for the given employee, ordered by change_date
-    return []
+    engine = get_engine()
+    with engine.connect() as conn:
+        rows = conn.execute(
+            text(
+                """
+                SELECT change_date, old_salary, new_salary, reason
+                FROM salary_history
+                WHERE employee_id = :emp_id
+                ORDER BY change_date
+                """
+            ),
+            {"emp_id": emp_id},
+        ).mappings().all()
+    return [dict(row) for row in rows]

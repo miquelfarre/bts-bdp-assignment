@@ -19,6 +19,7 @@ env
 venv
 .venv
 .ruff_cache
+.env
 
 # vim temporary files
 *~
