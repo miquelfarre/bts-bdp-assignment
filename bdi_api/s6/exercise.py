@@ -1,8 +1,9 @@
-from typing import Annotated
+from typing import Annotated, Optional
 
-from fastapi import APIRouter, status
+from fastapi import APIRouter, HTTPException, status
 from fastapi.params import Query
 from pydantic import BaseModel
+from pymongo import MongoClient
 
 from bdi_api.settings import Settings
 
@@ -20,13 +21,19 @@ s6 = APIRouter(
 
 class AircraftPosition(BaseModel):
     icao: str
-    registration: str | None = None
-    type: str | None = None
+    registration: Optional[str] = None
+    type: Optional[str] = None
     lat: float
     lon: float
-    alt_baro: float | None = None
-    ground_speed: float | None = None
+    alt_baro: Optional[float] = None
+    ground_speed: Optional[float] = None
     timestamp: str
+
+
+def _get_collection():
+    client = MongoClient(settings.mongo_url)
+    db = client["bdi_aircraft"]
+    return db["positions"]
 
 
 @s6.post("/aircraft")
@@ -38,9 +45,9 @@ def create_aircraft(position: AircraftPosition) -> dict:
     Database name: bdi_aircraft
     Collection name: positions
     """
-    # TODO: Connect to MongoDB using pymongo.MongoClient(settings.mongo_url)
-    # TODO: Insert the position document into the 'positions' collection
-    # TODO: Return {"status": "ok"}
+    collection = _get_collection()
+    doc = position.model_dump()
+    collection.insert_one(doc)
     return {"status": "ok"}
 
 
@@ -52,10 +59,14 @@ def aircraft_stats() -> list[dict]:
 
     Use MongoDB's aggregation pipeline with $group.
     """
-    # TODO: Connect to MongoDB
-    # TODO: Use collection.aggregate() with $group on 'type' field
-    # TODO: Return list sorted by count descending
-    return []
+    collection = _get_collection()
+    pipeline = [
+        {"$group": {"_id": "$type", "count": {"$sum": 1}}},
+        {"$sort": {"count": -1}},
+        {"$project": {"_id": 0, "type": "$_id", "count": 1}},
+    ]
+    results = list(collection.aggregate(pipeline))
+    return results
 
 
 @s6.get("/aircraft/")
@@ -74,10 +85,22 @@ def list_aircraft(
     Each result should include: icao, registration, type.
     Use MongoDB's skip() and limit() for pagination.
     """
-    # TODO: Connect to MongoDB
-    # TODO: Query distinct aircraft, apply skip/limit for pagination
-    # TODO: Return list of dicts with icao, registration, type
-    return []
+    collection = _get_collection()
+    skip = (page - 1) * page_size
+
+    pipeline = [
+        {"$group": {
+            "_id": "$icao",
+            "registration": {"$first": "$registration"},
+            "type": {"$first": "$type"},
+        }},
+        {"$sort": {"_id": 1}},
+        {"$skip": skip},
+        {"$limit": page_size},
+        {"$project": {"_id": 0, "icao": "$_id", "registration": 1, "type": 1}},
+    ]
+    results = list(collection.aggregate(pipeline))
+    return results
 
 
 @s6.get("/aircraft/{icao}")
@@ -87,10 +110,15 @@ def get_aircraft(icao: str) -> dict:
     Return the most recent document matching the given ICAO code.
     If not found, return 404.
     """
-    # TODO: Connect to MongoDB
-    # TODO: Find the latest document for this icao (sort by timestamp descending)
-    # TODO: Return 404 if not found
-    return {}
+    collection = _get_collection()
+    doc = collection.find_one(
+        {"icao": icao},
+        sort=[("timestamp", -1)],
+        projection={"_id": 0},
+    )
+    if not doc:
+        raise HTTPException(status_code=404, detail=f"Aircraft '{icao}' not found")
+    return doc
 
 
 @s6.delete("/aircraft/{icao}")
@@ -99,7 +127,6 @@ def delete_aircraft(icao: str) -> dict:
 
     Returns the number of deleted documents.
     """
-    # TODO: Connect to MongoDB
-    # TODO: Delete all documents matching the icao
-    # TODO: Return {"deleted": <count>}
-    return {"deleted": 0}
+    collection = _get_collection()
+    result = collection.delete_many({"icao": icao})
+    return {"deleted": result.deleted_count}
