@@ -33,7 +33,8 @@ class AircraftPosition(BaseModel):
 def _get_collection():
     client = MongoClient(settings.mongo_url)
     db = client["bdi_aircraft"]
-    return db["positions"]
+    collection = db["positions"]
+    return collection
 
 
 @s6.post("/aircraft")
