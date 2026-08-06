@@ -1,4 +1,5 @@
 from fastapi import APIRouter, HTTPException, status
+from neo4j import GraphDatabase
 from pydantic import BaseModel
 
 from bdi_api.settings import Settings
@@ -27,6 +28,13 @@ class RelationshipCreate(BaseModel):
     relationship_type: str = "FRIENDS_WITH"
 
 
+def _get_driver():
+    return GraphDatabase.driver(
+        settings.neo4j_url,
+        auth=(settings.neo4j_user, settings.neo4j_password),
+    )
+
+
 @s7.post("/graph/person")
 def create_person(person: PersonCreate) -> dict:
     """Create a person node in Neo4J.
@@ -34,9 +42,15 @@ def create_person(person: PersonCreate) -> dict:
     Use the BDI_NEO4J_URL environment variable to configure the connection.
     Start Neo4J with: make neo4j
     """
-    # TODO: Connect to Neo4J using neo4j.GraphDatabase.driver(settings.neo4j_url, auth=(settings.neo4j_user, settings.neo4j_password))
-    # TODO: Create a Person node with the given properties
-    # TODO: Return {"status": "ok", "name": person.name}
+    driver = _get_driver()
+    with driver.session() as session:
+        session.run(
+            "MERGE (p:Person {name: $name}) SET p.city = $city, p.age = $age",
+            name=person.name,
+            city=person.city,
+            age=person.age,
+        )
+    driver.close()
     return {"status": "ok", "name": person.name}
 
 
@@ -46,10 +60,12 @@ def list_persons() -> list[dict]:
 
     Each result should include: name, city, age.
     """
-    # TODO: Connect to Neo4J
-    # TODO: MATCH (p:Person) RETURN p
-    # TODO: Return list of dicts with name, city, age
-    return []
+    driver = _get_driver()
+    with driver.session() as session:
+        result = session.run("MATCH (p:Person) RETURN p.name AS name, p.city AS city, p.age AS age")
+        persons = [{"name": r["name"], "city": r["city"], "age": r["age"]} for r in result]
+    driver.close()
+    return persons
 
 
 @s7.get("/graph/person/{name}/friends")
@@ -59,11 +75,27 @@ def get_friends(name: str) -> list[dict]:
     Returns all persons connected by a FRIENDS_WITH relationship (any direction).
     If person not found, return 404.
     """
-    # TODO: Connect to Neo4J
-    # TODO: First check if person exists, return 404 if not
-    # TODO: MATCH (p:Person {name: name})-[:FRIENDS_WITH]-(friend:Person)
-    # TODO: Return list of friend dicts with name, city, age
-    raise HTTPException(status_code=404, detail=f"Person '{name}' not found")
+    driver = _get_driver()
+    with driver.session() as session:
+        # Check if person exists
+        check = session.run(
+            "MATCH (p:Person {name: $name}) RETURN p",
+            name=name,
+        )
+        if not check.single():
+            driver.close()
+            raise HTTPException(status_code=404, detail=f"Person '{name}' not found")
+
+        result = session.run(
+            """
+            MATCH (p:Person {name: $name})-[:FRIENDS_WITH]-(friend:Person)
+            RETURN friend.name AS name, friend.city AS city, friend.age AS age
+            """,
+            name=name,
+        )
+        friends = [{"name": r["name"], "city": r["city"], "age": r["age"]} for r in result]
+    driver.close()
+    return friends
 
 
 @s7.post("/graph/relationship")
@@ -72,10 +104,35 @@ def create_relationship(rel: RelationshipCreate) -> dict:
 
     Both persons must exist. Returns 404 if either is not found.
     """
-    # TODO: Connect to Neo4J
-    # TODO: Verify both persons exist
-    # TODO: CREATE (a)-[:FRIENDS_WITH]->(b)
-    # TODO: Return {"status": "ok", "from": rel.from_person, "to": rel.to_person}
+    driver = _get_driver()
+    with driver.session() as session:
+        # Verify both persons exist
+        result = session.run(
+            """
+            OPTIONAL MATCH (a:Person {name: $from_person})
+            OPTIONAL MATCH (b:Person {name: $to_person})
+            RETURN a IS NOT NULL AS a_exists, b IS NOT NULL AS b_exists
+            """,
+            from_person=rel.from_person,
+            to_person=rel.to_person,
+        )
+        record = result.single()
+        if not record["a_exists"]:
+            driver.close()
+            raise HTTPException(status_code=404, detail=f"Person '{rel.from_person}' not found")
+        if not record["b_exists"]:
+            driver.close()
+            raise HTTPException(status_code=404, detail=f"Person '{rel.to_person}' not found")
+
+        session.run(
+            """
+            MATCH (a:Person {name: $from_person}), (b:Person {name: $to_person})
+            MERGE (a)-[:FRIENDS_WITH]->(b)
+            """,
+            from_person=rel.from_person,
+            to_person=rel.to_person,
+        )
+    driver.close()
     return {"status": "ok", "from": rel.from_person, "to": rel.to_person}
 
 
@@ -89,8 +146,29 @@ def get_recommendations(name: str) -> list[dict]:
 
     Each result should include: name, city, mutual_friends (count).
     """
-    # TODO: Connect to Neo4J
-    # TODO: First check if person exists, return 404 if not
-    # TODO: Find friends-of-friends not already friends
-    # TODO: Count mutual friends and sort descending
-    raise HTTPException(status_code=404, detail=f"Person '{name}' not found")
+    driver = _get_driver()
+    with driver.session() as session:
+        # Check if person exists
+        check = session.run(
+            "MATCH (p:Person {name: $name}) RETURN p",
+            name=name,
+        )
+        if not check.single():
+            driver.close()
+            raise HTTPException(status_code=404, detail=f"Person '{name}' not found")
+
+        result = session.run(
+            """
+            MATCH (p:Person {name: $name})-[:FRIENDS_WITH]-(friend)-[:FRIENDS_WITH]-(fof:Person)
+            WHERE fof <> p AND NOT (p)-[:FRIENDS_WITH]-(fof)
+            RETURN fof.name AS name, fof.city AS city, COUNT(DISTINCT friend) AS mutual_friends
+            ORDER BY mutual_friends DESC
+            """,
+            name=name,
+        )
+        recommendations = [
+            {"name": r["name"], "city": r["city"], "mutual_friends": r["mutual_friends"]}
+            for r in result
+        ]
+    driver.close()
+    return recommendations

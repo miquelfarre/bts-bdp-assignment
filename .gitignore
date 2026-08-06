@@ -35,3 +35,4 @@ venv
 .pytest.json
 
 CLAUDE.md
+hr_database.db

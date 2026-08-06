@@ -1,6 +1,10 @@
+import json
 import os
+import shutil
 from typing import Annotated
 
+import duckdb
+import requests
 from fastapi import APIRouter, status
 from fastapi.params import Query
 
@@ -16,6 +20,18 @@ s1 = APIRouter(
     prefix="/api/s1",
     tags=["s1"],
 )
+
+DB_PATH = os.path.join(settings.prepared_dir, "aircraft.duckdb")
+
+
+def _generate_file_names() -> list[str]:
+    """Generate all possible file names for a day in ascending order."""
+    files = []
+    for h in range(24):
+        for m in range(60):
+            for s in range(0, 60, 5):
+                files.append(f"{h:02d}{m:02d}{s:02d}Z.json.gz")
+    return files
 
 
 @s1.post("/aircraft/download")
@@ -50,7 +66,21 @@ def download_data(
     """
     download_dir = os.path.join(settings.raw_dir, "day=20231101")
     base_url = settings.source_url + "/2023/11/01/"
-    # TODO Implement download
+
+    # Clean download folder
+    if os.path.exists(download_dir):
+        shutil.rmtree(download_dir)
+    os.makedirs(download_dir, exist_ok=True)
+
+    file_names = _generate_file_names()
+
+    for fname in file_names[:file_limit]:
+        url = base_url + fname
+        resp = requests.get(url, timeout=30)
+        if resp.status_code == 200:
+            file_path = os.path.join(download_dir, fname)
+            with open(file_path, "wb") as f:
+                f.write(resp.content)
 
     return "OK"
 
@@ -74,7 +104,64 @@ def prepare_data() -> str:
 
     Keep in mind that we are downloading a lot of small files, and some libraries might not work well with this!
     """
-    # TODO
+    raw_dir = os.path.join(settings.raw_dir, "day=20231101")
+    os.makedirs(settings.prepared_dir, exist_ok=True)
+
+    # Clean prepared folder
+    if os.path.exists(DB_PATH):
+        os.remove(DB_PATH)
+
+    records = []
+    for fname in sorted(os.listdir(raw_dir)):
+        fpath = os.path.join(raw_dir, fname)
+        with open(fpath) as f:
+            data = json.load(f)
+
+        timestamp = data.get("now", 0)
+        for ac in data.get("aircraft", []):
+            if "lat" not in ac or "lon" not in ac:
+                continue
+            records.append({
+                "icao": ac.get("hex", ""),
+                "registration": ac.get("r"),
+                "type": ac.get("t"),
+                "lat": ac["lat"],
+                "lon": ac["lon"],
+                "alt_baro": ac.get("alt_baro") if isinstance(ac.get("alt_baro"), (int, float)) else None,
+                "ground_speed": ac.get("gs"),
+                "timestamp": timestamp,
+                "emergency": ac.get("emergency", "none"),
+            })
+
+    con = duckdb.connect(DB_PATH)
+    con.execute("""
+        CREATE TABLE IF NOT EXISTS aircraft_positions (
+            icao VARCHAR,
+            registration VARCHAR,
+            type VARCHAR,
+            lat DOUBLE,
+            lon DOUBLE,
+            alt_baro DOUBLE,
+            ground_speed DOUBLE,
+            timestamp DOUBLE,
+            emergency VARCHAR
+        )
+    """)
+
+    if records:
+        con.executemany(
+            "INSERT INTO aircraft_positions VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            [
+                (
+                    r["icao"], r["registration"], r["type"],
+                    r["lat"], r["lon"], r["alt_baro"],
+                    r["ground_speed"], r["timestamp"], r["emergency"],
+                )
+                for r in records
+            ],
+        )
+
+    con.close()
     return "OK"
 
 
@@ -83,8 +170,20 @@ def list_aircraft(num_results: int = 100, page: int = 0) -> list[dict]:
     """List all the available aircraft, its registration and type ordered by
     icao asc
     """
-    # TODO
-    return [{"icao": "0d8300", "registration": "YV3382", "type": "LJ31"}]
+    con = duckdb.connect(DB_PATH, read_only=True)
+    offset = page * num_results
+    result = con.execute(
+        """
+        SELECT DISTINCT icao, registration, type
+        FROM aircraft_positions
+        ORDER BY icao ASC
+        LIMIT ? OFFSET ?
+        """,
+        [num_results, offset],
+    ).fetchall()
+    con.close()
+
+    return [{"icao": r[0], "registration": r[1], "type": r[2]} for r in result]
 
 
 @s1.get("/aircraft/{icao}/positions")
@@ -92,8 +191,21 @@ def get_aircraft_position(icao: str, num_results: int = 1000, page: int = 0) -> 
     """Returns all the known positions of an aircraft ordered by time (asc)
     If an aircraft is not found, return an empty list.
     """
-    # TODO implement and return a list with dictionaries with those values.
-    return [{"timestamp": 1609275898.6, "lat": 30.404617, "lon": -86.476566}]
+    con = duckdb.connect(DB_PATH, read_only=True)
+    offset = page * num_results
+    result = con.execute(
+        """
+        SELECT timestamp, lat, lon
+        FROM aircraft_positions
+        WHERE icao = ?
+        ORDER BY timestamp ASC
+        LIMIT ? OFFSET ?
+        """,
+        [icao, num_results, offset],
+    ).fetchall()
+    con.close()
+
+    return [{"timestamp": r[0], "lat": r[1], "lon": r[2]} for r in result]
 
 
 @s1.get("/aircraft/{icao}/stats")
@@ -104,5 +216,22 @@ def get_aircraft_statistics(icao: str) -> dict:
     * max_ground_speed
     * had_emergency
     """
-    # TODO Gather and return the correct statistics for the requested aircraft
-    return {"max_altitude_baro": 300000, "max_ground_speed": 493, "had_emergency": False}
+    con = duckdb.connect(DB_PATH, read_only=True)
+    result = con.execute(
+        """
+        SELECT
+            MAX(alt_baro) as max_alt,
+            MAX(ground_speed) as max_gs,
+            BOOL_OR(emergency IS NOT NULL AND emergency != 'none') as had_emergency
+        FROM aircraft_positions
+        WHERE icao = ?
+        """,
+        [icao],
+    ).fetchone()
+    con.close()
+
+    return {
+        "max_altitude_baro": result[0] if result else None,
+        "max_ground_speed": result[1] if result else None,
+        "had_emergency": bool(result[2]) if result else False,
+    }
